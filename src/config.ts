@@ -31,6 +31,7 @@ if (!parsed.success) {
 export const config = {
   ...parsed.data,
   ADMIN_EMAIL: parsed.data.ADMIN_EMAIL.toLowerCase(),
-  corsOrigins: parsed.data.CORS_ORIGINS.split(',').map(value => value.trim()).filter(Boolean)
+  corsOrigins: parsed.data.CORS_ORIGINS.split(',').map(value => value.trim()).filter(Boolean),
+  corsAllowAll: parsed.data.CORS_ORIGINS.split(',').some(value => value.trim() === '*')
 };
 

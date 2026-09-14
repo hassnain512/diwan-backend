@@ -17,7 +17,7 @@ app.set('trust proxy', config.TRUST_PROXY);
 app.disable('x-powered-by');
 app.use(helmet());
 app.use(cors({ origin(origin, callback) {
-  if (!origin || config.corsOrigins.length === 0 || config.corsOrigins.includes(origin)) return callback(null, true);
+  if (!origin || config.corsAllowAll || config.corsOrigins.includes(origin)) return callback(null, true);
   callback(new Error('Origin is not allowed.'));
 }}));
 app.use(express.json({ limit: '2mb' }));
