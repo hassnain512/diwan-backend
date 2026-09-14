@@ -57,25 +57,26 @@ const cleanPoetry = (html: string) => sanitizeHtml(html, {
 });
 
 const remoteImageUrl = z.string().max(2048).refine(value => value === '' || /^https?:\/\//i.test(value), 'Image must be an HTTP(S) URL.');
+const isoDate = z.string().datetime({ offset: true });
 
 const bookInput = z.object({
   id: z.string().min(1).max(120).optional(), title: z.string().trim().min(1).max(300),
   coverType: z.enum(['generated', 'custom']).optional(), coverUrl: remoteImageUrl.nullish(),
   coverTheme: z.string().max(80).nullish(), coverOrnament: z.string().max(80).nullish(),
   status: z.enum(['draft', 'coming_soon', 'published']), orderIndex: z.number().int().min(0).optional(),
-  createdAt: z.string().datetime().optional(), updatedAt: z.string().datetime().optional()
+  createdAt: isoDate.optional(), updatedAt: isoDate.optional()
 });
 const writingInput = z.object({
   id: z.string().min(1).max(120).optional(), bookId: z.string().min(1).max(120).optional(),
   title: z.string().trim().min(1).max(300), content: z.string().max(1_000_000),
   status: z.enum(['draft', 'published']), orderIndex: z.number().int().min(0).optional(),
-  createdAt: z.string().datetime().optional(), updatedAt: z.string().datetime().optional()
+  createdAt: isoDate.optional(), updatedAt: isoDate.optional()
 });
 const authorInput = z.object({
   authorName: z.string().trim().min(1).max(160).optional(), authorNameUrdu: z.string().trim().min(1).max(160).optional(),
   penNameUrdu: z.string().trim().min(1).max(160).optional(), email: z.string().email().optional(),
   biography: z.string().max(100_000).optional(), introduction: z.string().max(100_000).optional(),
-  profileImage: remoteImageUrl.optional(), updatedAt: z.string().datetime().optional()
+  profileImage: remoteImageUrl.optional(), updatedAt: isoDate.optional()
 });
 
 app.get('/health', asyncRoute(async (_req, res) => {
@@ -311,7 +312,7 @@ async function applyOutboxOperation(operation: any) {
 }
 
 app.post('/api/sync/push', authenticate, requireAdmin, asyncRoute(async (req, res) => {
-  const { operations } = parse(z.object({ operations: z.array(z.object({ id: z.number().int().positive(), entityType: z.enum(['author', 'book', 'writing']), entityId: z.string().min(1), operation: z.enum(['upsert', 'delete']), payload: z.unknown(), updatedAt: z.string().datetime() })).max(500) }), req.body);
+  const { operations } = parse(z.object({ operations: z.array(z.object({ id: z.number().int().positive(), entityType: z.enum(['author', 'book', 'writing']), entityId: z.string().min(1), operation: z.enum(['upsert', 'delete']), payload: z.unknown(), updatedAt: isoDate })).max(500) }), req.body);
   const acceptedIds: number[] = [];
   for (const operation of operations) { await applyOutboxOperation(operation); acceptedIds.push(operation.id); }
   await audit(req, 'sync.push', undefined, undefined, { count: acceptedIds.length });
@@ -345,7 +346,7 @@ app.get('/api/backup/export', authenticate, requireAdmin, asyncRoute(async (_req
 }));
 
 app.post('/api/backup/restore', authenticate, requireAdmin, asyncRoute(async (req, res) => {
-  const snapshot = parse(z.object({ authorProfile: authorInput.required(), books: z.array(bookInput.extend({ id: z.string().min(1), createdAt: z.string().datetime(), updatedAt: z.string().datetime() })).max(10_000), writings: z.array(writingInput.extend({ id: z.string().min(1), bookId: z.string().min(1), createdAt: z.string().datetime(), updatedAt: z.string().datetime() })).max(100_000) }), req.body);
+  const snapshot = parse(z.object({ authorProfile: authorInput.required(), books: z.array(bookInput.extend({ id: z.string().min(1), createdAt: isoDate, updatedAt: isoDate })).max(10_000), writings: z.array(writingInput.extend({ id: z.string().min(1), bookId: z.string().min(1), createdAt: isoDate, updatedAt: isoDate })).max(100_000) }), req.body);
   const author = authorToRow(snapshot.authorProfile);
   const books = snapshot.books.map(bookToRow);
   const writings = snapshot.writings.map(value => writingToRow({ ...value, content: cleanPoetry(value.content) }));
