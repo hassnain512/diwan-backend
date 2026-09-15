@@ -2,8 +2,8 @@
 import argon2 from 'argon2';
 import cors from 'cors';
 import express, { type NextFunction, type Request, type Response } from 'express';
-import rateLimit from 'express-rate-limit';
-import helmet from 'helmet';
+import { rateLimit } from 'express-rate-limit';
+import * as helmetModule from 'helmet';
 import multer from 'multer';
 import sanitizeHtml from 'sanitize-html';
 import { z } from 'zod';
@@ -13,6 +13,7 @@ import { assertDatabaseReady, authorToRow, bookToRow, nowIso, supabase, toAuthor
 import { sendOtpEmail } from './mailer.js';
 
 const app = express();
+const helmet = helmetModule.default;
 app.set('trust proxy', config.TRUST_PROXY);
 app.disable('x-powered-by');
 app.use(helmet());
