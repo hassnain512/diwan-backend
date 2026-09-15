@@ -80,9 +80,20 @@ const authorInput = z.object({
   profileImage: remoteImageUrl.optional(), updatedAt: isoDate.optional()
 });
 
+app.get('/', (_req, res) => {
+  res.json({ service: 'diwan-api', status: 'ok', time: nowIso() });
+});
+
+app.get('/favicon.ico', (_req, res) => res.status(204).end());
+
 app.get('/health', asyncRoute(async (_req, res) => {
-  unwrap(await supabase.from('author_profile').select('id').limit(1));
-  res.json({ ok: true, database: 'connected', time: nowIso() });
+  try {
+    unwrap(await supabase.from('author_profile').select('id').limit(1));
+    res.json({ ok: true, database: 'connected', time: nowIso() });
+  } catch (error) {
+    console.error('Health check failed:', error);
+    res.status(503).json({ ok: false, database: 'unreachable', time: nowIso() });
+  }
 }));
 
 app.post('/api/auth/admin/send-otp', otpLimiter, asyncRoute(async (req, res) => {
