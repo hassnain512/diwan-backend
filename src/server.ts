@@ -1,7 +1,7 @@
 ﻿import { createHmac, randomInt, randomUUID } from 'node:crypto';
 import argon2 from 'argon2';
 import cors from 'cors';
-import express, { type NextFunction, type Request, type Response } from 'express';
+import express, { type NextFunction, type Request, type RequestHandler, type Response } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import * as helmetModule from 'helmet';
 import multer from 'multer';
@@ -13,10 +13,10 @@ import { assertDatabaseReady, authorToRow, bookToRow, nowIso, supabase, toAuthor
 import { sendOtpEmail } from './mailer.js';
 
 const app = express();
-const helmet = helmetModule.default;
+const createHelmetMiddleware = helmetModule.default as unknown as () => RequestHandler;
 app.set('trust proxy', config.TRUST_PROXY);
 app.disable('x-powered-by');
-app.use(helmet());
+app.use(createHelmetMiddleware());
 app.use(cors({ origin(origin, callback) {
   if (!origin || config.corsAllowAll || config.corsOrigins.includes(origin)) return callback(null, true);
   callback(new Error('Origin is not allowed.'));
