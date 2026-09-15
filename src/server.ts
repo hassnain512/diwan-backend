@@ -375,6 +375,7 @@ app.use((error: any, req: Request, res: Response, _next: NextFunction) => {
 });
 
 export { app };
+export default app;
 
 async function startServer() {
   await assertDatabaseReady();
