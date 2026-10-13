@@ -30,8 +30,43 @@ app.use((req, res, next) => {
   next();
 });
 
-const authLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false });
-const otpLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 5, standardHeaders: 'draft-8', legacyHeaders: false });
+const rateLimitResponse = (message: string) => (req: Request, res: Response) => {
+  res.status(429).json({ error: message, code: 'RATE_LIMITED', requestId: req.get('x-request-id') });
+};
+const emailRateLimitKey = (req: Request) => {
+  const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  return email || 'missing-email';
+};
+const authLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: 20,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  handler: rateLimitResponse('Too many sign-in attempts. Please wait 15 minutes and try again.')
+});
+const otpIpLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: 10,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  handler: rateLimitResponse('Too many verification-code requests from this connection. Please wait 15 minutes and try again.')
+});
+const otpEmailLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: 5,
+  keyGenerator: emailRateLimitKey,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  handler: rateLimitResponse('Too many verification codes were requested for this email. Please wait 15 minutes and try again.')
+});
+const otpVerifyEmailLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: 10,
+  keyGenerator: emailRateLimitKey,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  handler: rateLimitResponse('Too many verification attempts for this email. Please wait 15 minutes and try again.')
+});
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 6 * 1024 * 1024, files: 1 },
@@ -96,17 +131,21 @@ app.get('/health', asyncRoute(async (_req, res) => {
   }
 }));
 
-app.post('/api/auth/admin/send-otp', otpLimiter, asyncRoute(async (req, res) => {
+app.post('/api/auth/admin/send-otp', otpIpLimiter, otpEmailLimiter, asyncRoute(async (req, res) => {
   const { email } = parse(z.object({ email: z.string().email() }), req.body);
   const normalized = email.toLowerCase();
   const admin = unwrap<any>(await supabase.from('admin_accounts').select('id,status').eq('email', normalized).maybeSingle());
-  if (normalized === config.ADMIN_EMAIL && !admin) {
-    unwrap(await supabase.from('admin_accounts').insert({ email: normalized }).select('id').single());
-  } else if (!admin || admin.status !== 'active') {
-    return res.json({ success: true });
-  }
+  if (!admin) throw Object.assign(new Error('No author account is registered with this email address.'), { status: 404, code: 'AUTHOR_NOT_REGISTERED' });
+  if (admin.status !== 'active') throw Object.assign(new Error('This author account is inactive.'), { status: 403, code: 'AUTHOR_INACTIVE' });
   const recent = unwrap<any>(await supabase.from('otp_challenges').select('created_at').eq('email', normalized).order('created_at', { ascending: false }).limit(1).maybeSingle());
-  if (recent && Date.now() - new Date(recent.created_at).getTime() < 60_000) return res.json({ success: true });
+  if (recent) {
+    const elapsed = Date.now() - new Date(recent.created_at).getTime();
+    if (elapsed < 60_000) {
+      const retryAfter = Math.max(1, Math.ceil((60_000 - elapsed) / 1000));
+      res.setHeader('Retry-After', String(retryAfter));
+      throw Object.assign(new Error(`Please wait ${retryAfter} seconds before requesting another verification code.`), { status: 429, code: 'OTP_COOLDOWN' });
+    }
+  }
   const code = String(randomInt(100000, 1_000_000));
   await supabase.from('otp_challenges').delete().eq('email', normalized).is('consumed_at', null);
   const challenge = unwrap<any>(await supabase.from('otp_challenges').insert({
@@ -119,7 +158,7 @@ app.post('/api/auth/admin/send-otp', otpLimiter, asyncRoute(async (req, res) => 
   res.json({ success: true });
 }));
 
-app.post('/api/auth/admin/verify-otp', authLimiter, asyncRoute(async (req, res) => {
+app.post('/api/auth/admin/verify-otp', authLimiter, otpVerifyEmailLimiter, asyncRoute(async (req, res) => {
   const { email, otp } = parse(z.object({ email: z.string().email(), otp: z.string().regex(/^\d{6}$/) }), req.body);
   const normalized = email.toLowerCase();
   const consumed = unwrap<boolean>(await supabase.rpc('consume_admin_otp', { p_email: normalized, p_code_hash: otpHash(normalized, otp) }));
