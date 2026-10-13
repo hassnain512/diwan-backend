@@ -263,6 +263,18 @@ app.put('/api/writings/:id', authenticate, requireAdmin, asyncRoute(async (req, 
   res.json(toWriting(row));
 }));
 
+app.post('/api/writings/:id/move', authenticate, requireAdmin, asyncRoute(async (req, res) => {
+  const { bookId } = parse(z.object({ bookId: z.string().min(1).max(120) }), req.body);
+  const current = unwrap<any>(await supabase.from('writings').select('id,book_id').eq('id', req.params.id).maybeSingle());
+  if (!current) throw Object.assign(new Error('Poem not found.'), { status: 404, code: 'WRITING_NOT_FOUND' });
+  const destination = unwrap<any>(await supabase.from('books').select('id').eq('id', bookId).maybeSingle());
+  if (!destination) throw Object.assign(new Error('Destination collection not found.'), { status: 404, code: 'BOOK_NOT_FOUND' });
+  if (current.book_id !== bookId) unwrap(await supabase.rpc('move_writing', { p_writing_id: current.id, p_destination_book_id: bookId }));
+  const moved = unwrap<any>(await supabase.from('writings').select('*').eq('id', current.id).single());
+  await audit(req, 'writing.move', 'writing', current.id, { fromBookId: current.book_id, toBookId: bookId });
+  res.json(toWriting(moved));
+}));
+
 app.delete('/api/writings/:id', authenticate, requireAdmin, asyncRoute(async (req, res) => {
   unwrap(await supabase.from('writings').delete().eq('id', req.params.id).select('id').single());
   await audit(req, 'writing.delete', 'writing', String(req.params.id));
