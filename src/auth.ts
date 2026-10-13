@@ -36,24 +36,40 @@ export async function issueSession(role: Role, subjectId: string, tokenVersion =
   return { role, token, refreshToken, expiresAt, ...details };
 }
 
+
+async function consumeRefreshToken(sessionId: string, presentedHash: string) {
+  const nextRefresh = randomBytes(48).toString('base64url');
+  const rotated = unwrap<any>(await supabase.from('auth_sessions')
+    .update({ refresh_token_hash: refreshHash(nextRefresh), last_used_at: nowIso() })
+    .eq('id', sessionId)
+    .eq('refresh_token_hash', presentedHash)
+    .is('revoked_at', null)
+    .gt('expires_at', nowIso())
+    .select('id')
+    .maybeSingle());
+  if (!rotated) {
+    throw Object.assign(new Error('Refresh token has already been used or is no longer valid.'), { status: 401 });
+  }
+  return nextRefresh;
+}
+
 export async function rotateSession(refreshToken: string) {
+  const presentedHash = refreshHash(refreshToken);
   const row = unwrap<any>(await supabase.from('auth_sessions').select('*')
-    .eq('refresh_token_hash', refreshHash(refreshToken)).is('revoked_at', null).gt('expires_at', nowIso()).maybeSingle());
+    .eq('refresh_token_hash', presentedHash).is('revoked_at', null).gt('expires_at', nowIso()).maybeSingle());
   if (!row) throw Object.assign(new Error('Invalid or expired refresh token.'), { status: 401 });
 
   if (row.subject_type === 'reader') {
     const reader = unwrap<any>(await supabase.from('readers').select('id,username,full_name,status,device_id,token_version').eq('id', row.subject_id).maybeSingle());
     if (!reader || reader.status !== 'active' || reader.token_version !== row.token_version) throw Object.assign(new Error('Session has been revoked.'), { status: 401 });
-    const nextRefresh = randomBytes(48).toString('base64url');
-    unwrap(await supabase.from('auth_sessions').update({ refresh_token_hash: refreshHash(nextRefresh), last_used_at: nowIso() }).eq('id', row.id).select('id').single());
+    const nextRefresh = await consumeRefreshToken(row.id, presentedHash);
     const token = await accessToken({ role: 'reader', subjectId: reader.id, sessionId: row.id, tokenVersion: row.token_version });
     return { role: 'reader' as const, token, refreshToken: nextRefresh, expiresAt: row.expires_at, username: reader.username, fullName: reader.full_name, deviceId: reader.device_id };
   }
 
   const admin = unwrap<any>(await supabase.from('admin_accounts').select('id,email,status').eq('id', row.subject_id).maybeSingle());
   if (!admin || admin.status !== 'active') throw Object.assign(new Error('Session has been revoked.'), { status: 401 });
-  const nextRefresh = randomBytes(48).toString('base64url');
-  unwrap(await supabase.from('auth_sessions').update({ refresh_token_hash: refreshHash(nextRefresh), last_used_at: nowIso() }).eq('id', row.id).select('id').single());
+  const nextRefresh = await consumeRefreshToken(row.id, presentedHash);
   const token = await accessToken({ role: 'admin', subjectId: admin.id, sessionId: row.id, tokenVersion: row.token_version });
   return { role: 'admin' as const, token, refreshToken: nextRefresh, expiresAt: row.expires_at, email: admin.email };
 }

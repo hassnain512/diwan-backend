@@ -134,18 +134,17 @@ app.get('/health', asyncRoute(async (_req, res) => {
 app.post('/api/auth/admin/send-otp', otpIpLimiter, otpEmailLimiter, asyncRoute(async (req, res) => {
   const { email } = parse(z.object({ email: z.string().email() }), req.body);
   const normalized = email.toLowerCase();
+  const neutralResponse = () => res.json({
+    success: true,
+    message: 'If this email belongs to an active author account, a verification code has been sent.'
+  });
+
   const admin = unwrap<any>(await supabase.from('admin_accounts').select('id,status').eq('email', normalized).maybeSingle());
-  if (!admin) throw Object.assign(new Error('No author account is registered with this email address.'), { status: 404, code: 'AUTHOR_NOT_REGISTERED' });
-  if (admin.status !== 'active') throw Object.assign(new Error('This author account is inactive.'), { status: 403, code: 'AUTHOR_INACTIVE' });
+  if (!admin || admin.status !== 'active') return neutralResponse();
+
   const recent = unwrap<any>(await supabase.from('otp_challenges').select('created_at').eq('email', normalized).order('created_at', { ascending: false }).limit(1).maybeSingle());
-  if (recent) {
-    const elapsed = Date.now() - new Date(recent.created_at).getTime();
-    if (elapsed < 60_000) {
-      const retryAfter = Math.max(1, Math.ceil((60_000 - elapsed) / 1000));
-      res.setHeader('Retry-After', String(retryAfter));
-      throw Object.assign(new Error(`Please wait ${retryAfter} seconds before requesting another verification code.`), { status: 429, code: 'OTP_COOLDOWN' });
-    }
-  }
+  if (recent && Date.now() - new Date(recent.created_at).getTime() < 60_000) return neutralResponse();
+
   const code = String(randomInt(100000, 1_000_000));
   await supabase.from('otp_challenges').delete().eq('email', normalized).is('consumed_at', null);
   const challenge = unwrap<any>(await supabase.from('otp_challenges').insert({
@@ -153,9 +152,13 @@ app.post('/api/auth/admin/send-otp', otpIpLimiter, otpEmailLimiter, asyncRoute(a
     code_hash: otpHash(normalized, code),
     expires_at: new Date(Date.now() + config.OTP_TTL_MINUTES * 60_000).toISOString()
   }).select('id').single());
-  try { await sendOtpEmail(normalized, code); }
-  catch (error) { await supabase.from('otp_challenges').delete().eq('id', challenge.id); throw error; }
-  res.json({ success: true });
+  try {
+    await sendOtpEmail(normalized, code);
+  } catch (error) {
+    await supabase.from('otp_challenges').delete().eq('id', challenge.id);
+    console.error('Failed to send author verification email:', error);
+  }
+  return neutralResponse();
 }));
 
 app.post('/api/auth/admin/verify-otp', authLimiter, otpVerifyEmailLimiter, asyncRoute(async (req, res) => {
