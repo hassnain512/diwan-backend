@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
-import { jwtVerify, SignJWT } from 'jose';
+import { compactVerify, decodeJwt, errors as joseErrors, jwtVerify, SignJWT } from 'jose';
 import { config } from './config.js';
 import { nowIso, supabase, unwrap } from './db.js';
 
@@ -11,13 +11,32 @@ export type AuthenticatedRequest = Request & { principal?: Principal };
 const jwtKey = new TextEncoder().encode(config.JWT_SECRET);
 const refreshHash = (token: string) => createHash('sha256').update(token).digest('hex');
 
-async function accessToken(principal: Principal) {
+async function accessToken(principal: Principal, expiresAt: string) {
+  const expiration = Math.floor(new Date(expiresAt).getTime() / 1000);
   return new SignJWT({ role: principal.role, sid: principal.sessionId, ver: principal.tokenVersion })
     .setProtectedHeader({ alg: 'HS256' })
     .setSubject(principal.subjectId)
     .setIssuedAt()
-    .setExpirationTime('15m')
+    // Keep the JWT lifetime aligned with the session lifetime returned as expiresAt.
+    // The mobile app already persists expiresAt, so these two values must describe
+    // the same usable authentication lifetime.
+    .setExpirationTime(expiration)
     .sign(jwtKey);
+}
+
+async function verifyAccessToken(token: string) {
+  try {
+    return (await jwtVerify(token, jwtKey, { algorithms: ['HS256'] })).payload;
+  } catch (error) {
+    // Compatibility path for access tokens issued before this fix. Those tokens
+    // were signed for 15 minutes even though the API returned the 30-day session
+    // expiry in expiresAt. Verify the signature but let the database-backed
+    // session expiry below remain authoritative. This can be removed after all
+    // pre-fix sessions have naturally expired.
+    if (!(error instanceof joseErrors.JWTExpired)) throw error;
+    await compactVerify(token, jwtKey, { algorithms: ['HS256'] });
+    return decodeJwt(token);
+  }
 }
 
 export async function issueSession(role: Role, subjectId: string, tokenVersion = 0, details: Record<string, unknown> = {}) {
@@ -32,26 +51,25 @@ export async function issueSession(role: Role, subjectId: string, tokenVersion =
     token_version: tokenVersion,
     expires_at: expiresAt
   }).select('id').single());
-  const token = await accessToken({ role, subjectId, sessionId, tokenVersion });
+  const token = await accessToken({ role, subjectId, sessionId, tokenVersion }, expiresAt);
   return { role, token, refreshToken, expiresAt, ...details };
 }
 
 
-async function consumeRefreshToken(sessionId: string, presentedHash: string) {
-  const nextRefresh = randomBytes(48).toString('base64url');
-  const rotated = unwrap<any>(await supabase.from('auth_sessions')
-    .update({ refresh_token_hash: refreshHash(nextRefresh), last_used_at: nowIso() })
+async function touchRefreshSession(sessionId: string, presentedHash: string) {
+  const touched = unwrap<any>(await supabase.from('auth_sessions')
+    .update({ last_used_at: nowIso() })
     .eq('id', sessionId)
     .eq('refresh_token_hash', presentedHash)
     .is('revoked_at', null)
     .gt('expires_at', nowIso())
     .select('id')
     .maybeSingle());
-  if (!rotated) {
-    throw Object.assign(new Error('Refresh token has already been used or is no longer valid.'), { status: 401 });
+  if (!touched) {
+    throw Object.assign(new Error('Refresh token is no longer valid.'), { status: 401 });
   }
-  return nextRefresh;
 }
+
 
 export async function rotateSession(refreshToken: string) {
   const presentedHash = refreshHash(refreshToken);
@@ -62,23 +80,26 @@ export async function rotateSession(refreshToken: string) {
   if (row.subject_type === 'reader') {
     const reader = unwrap<any>(await supabase.from('readers').select('id,username,full_name,status,device_id,token_version').eq('id', row.subject_id).maybeSingle());
     if (!reader || reader.status !== 'active' || reader.token_version !== row.token_version) throw Object.assign(new Error('Session has been revoked.'), { status: 401 });
-    const nextRefresh = await consumeRefreshToken(row.id, presentedHash);
-    const token = await accessToken({ role: 'reader', subjectId: reader.id, sessionId: row.id, tokenVersion: row.token_version });
-    return { role: 'reader' as const, token, refreshToken: nextRefresh, expiresAt: row.expires_at, username: reader.username, fullName: reader.full_name, deviceId: reader.device_id };
+    // Keep the same refresh token for the lifetime of this session. The previous
+    // one-time rotation made concurrent startup refreshes race each other and
+    // broke clients that had not persisted the replacement token yet.
+    await touchRefreshSession(row.id, presentedHash);
+    const token = await accessToken({ role: 'reader', subjectId: reader.id, sessionId: row.id, tokenVersion: row.token_version }, row.expires_at);
+    return { role: 'reader' as const, token, refreshToken, expiresAt: row.expires_at, username: reader.username, fullName: reader.full_name, deviceId: reader.device_id };
   }
 
   const admin = unwrap<any>(await supabase.from('admin_accounts').select('id,email,status').eq('id', row.subject_id).maybeSingle());
   if (!admin || admin.status !== 'active') throw Object.assign(new Error('Session has been revoked.'), { status: 401 });
-  const nextRefresh = await consumeRefreshToken(row.id, presentedHash);
-  const token = await accessToken({ role: 'admin', subjectId: admin.id, sessionId: row.id, tokenVersion: row.token_version });
-  return { role: 'admin' as const, token, refreshToken: nextRefresh, expiresAt: row.expires_at, email: admin.email };
+  await touchRefreshSession(row.id, presentedHash);
+  const token = await accessToken({ role: 'admin', subjectId: admin.id, sessionId: row.id, tokenVersion: row.token_version }, row.expires_at);
+  return { role: 'admin' as const, token, refreshToken, expiresAt: row.expires_at, email: admin.email };
 }
 
 export async function authenticate(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   try {
     const raw = req.headers.authorization;
     if (!raw?.startsWith('Bearer ')) throw Object.assign(new Error('Authentication required.'), { status: 401 });
-    const { payload } = await jwtVerify(raw.slice(7), jwtKey, { algorithms: ['HS256'] });
+    const payload = await verifyAccessToken(raw.slice(7));
     const role = payload.role as Role;
     const sessionId = String(payload.sid ?? '');
     const subjectId = String(payload.sub ?? '');

@@ -44,6 +44,15 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
   handler: rateLimitResponse('Too many sign-in attempts. Please wait 15 minutes and try again.')
 });
+const refreshLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  // Refresh tokens are high-entropy secrets. Keep a generous abuse guard here
+  // so a mobile startup retry cannot accidentally lock a valid user out.
+  limit: 120,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  handler: rateLimitResponse('Too many session refresh attempts. Please wait and try again.')
+});
 const otpIpLimiter = rateLimit({
   windowMs: 15 * 60_000,
   limit: 10,
@@ -183,7 +192,7 @@ app.post('/api/auth/reader/login', authLimiter, asyncRoute(async (req, res) => {
   res.json(await issueSession('reader', reader.id, current.token_version, { username: current.username, fullName: current.full_name, deviceId: current.device_id }));
 }));
 
-app.post('/api/auth/refresh', authLimiter, asyncRoute(async (req, res) => {
+app.post('/api/auth/refresh', refreshLimiter, asyncRoute(async (req, res) => {
   const { refreshToken } = parse(z.object({ refreshToken: z.string().min(32) }), req.body);
   res.json(await rotateSession(refreshToken));
 }));
